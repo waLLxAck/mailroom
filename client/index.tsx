@@ -1005,6 +1005,7 @@ function Workspace() {
           remaining={status.remaining}
           close={() => setPrivacy(false)}
           disconnect={() => void removeConnection()}
+          reconnect={() => void connectGmail()}
         />
       )}
     </div>
@@ -1134,7 +1135,14 @@ function Decisions({
     </section>
   );
 }
-function Privacy({ close, connected, busy, disconnect, remaining }: any) {
+function Privacy({
+  close,
+  connected,
+  busy,
+  disconnect,
+  reconnect,
+  remaining,
+}: any) {
   const ref = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const before = document.activeElement as HTMLElement;
@@ -1214,6 +1222,11 @@ function Privacy({ close, connected, busy, disconnect, remaining }: any) {
           </p>
         </div>
         <div className="mt-6 flex flex-wrap gap-3">
+          {connected && (
+            <button disabled={busy} className={button} onClick={reconnect}>
+              Reconnect Gmail
+            </button>
+          )}
           {connected && (
             <button disabled={busy} className={button} onClick={disconnect}>
               Disconnect Gmail
