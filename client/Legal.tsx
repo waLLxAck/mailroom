@@ -76,7 +76,7 @@ export function Legal({ page }: { page: string }) {
               separate retention periods.
             </p>
             <h2 className="text-lg font-semibold">Privacy contact</h2>
-            <p>For privacy and data-protection matters only, contact <a className="text-blue-700 underline" href="mailto:svilen.petrov@eniks.ai">svilen.petrov@eniks.ai</a>. Technical support is not provided.</p>
+            <p>For privacy and data-protection matters only, contact <a className="text-blue-700 underline" href="mailto:svilen.petrov97@gmail.com">svilen.petrov97@gmail.com</a>. Technical support is not provided.</p>
             <h2 className="text-lg font-semibold">Service providers</h2>
             <p>
               Hosting and sign-in use Lakebed; mail access uses Google;

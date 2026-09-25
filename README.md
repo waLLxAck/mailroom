@@ -4,7 +4,7 @@ Canonical URL: https://mailroom.lakebed.app
 
 Tailscale entry: https://asus-omarchy.tail8116cc.ts.net:9443/
 
-Mailroom is a public-account Gmail classifier on Lakebed. Each signed-in user gets an isolated account, an encrypted personal OpenRouter key, and editable classification settings. There is no shared OpenRouter API-key fallback. **Google's Gmail OAuth project is still in Testing until its publishing/verification setup is completed; public app signup alone does not make Gmail available to every Google account.** Lakebed remains alpha infrastructure with shared capacity limits.
+Mailroom is a public-account Gmail classifier on Lakebed. Each signed-in user gets an isolated account, an encrypted personal OpenRouter key, and editable classification settings. There is no shared OpenRouter API-key fallback. **Google's Gmail OAuth audience is External / In production. Verification is still outstanding, so Google's unverified-app warning and 100-user cap apply.** Lakebed remains alpha infrastructure with shared capacity limits.
 
 ## Use
 
@@ -70,11 +70,11 @@ Use the deployment ID for authenticated inspection; custom-domain credential dis
 
 Cloud project: `mailroom-509610`. The Mailroom Web client has the canonical callback `https://mailroom.lakebed.app/gmail-connected` registered, and the hosted server uses it. Public homepage, privacy and terms links are configured in Google Cloud. Google developer contact includes `svilen.petrov@eniks.ai`.
 
-The app has open account registration. Google Gmail access remains in Testing pending the operator's choice about Google's consent contact: the selector currently offers only the existing Gmail account, not the requested eniks.ai address. Google restricts this field to eligible accounts/groups. Publishing an unverified restricted-scope app still leaves Google's warning and user cap; broad Gmail distribution requires verification, including domain ownership and any requested restricted-scope assessment.
+The app has open account registration. Google Gmail OAuth was published to Production on September 25, 2026, using `svilen.petrov97@gmail.com` as its consent-screen contact with the operator's approval. Google still requires verification for restricted Gmail access; the console currently reports a 100-user cap. Broad Gmail distribution requires verification, including domain ownership and any requested restricted-scope assessment.
 
 ## License and contact
 
-Free, open-source software under the MIT license. Mailroom charges no fees and offers no technical support or availability guarantee. Users pay their own OpenRouter usage charges. The address `svilen.petrov@eniks.ai` is for privacy/data-protection matters and Google verification, not technical support.
+Free, open-source software under the MIT license. Mailroom charges no fees and offers no technical support or availability guarantee. Users pay their own OpenRouter usage charges. The address `svilen.petrov97@gmail.com` is for privacy/data-protection matters and Google verification, not technical support.
 
 For your own deployment, remove the existing `deployId` from `lakebed.json`, create your own Google OAuth project and encryption key, and configure your own app origin and redirect URI. Never reuse another deployment's credentials.
 
