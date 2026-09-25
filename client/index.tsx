@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
+  Router,
+  Routes,
+  Route,
   canAccessApp,
   createClient,
   retryAuth,
@@ -60,10 +63,16 @@ function Mark() {
   );
 }
 export function App() {
+  return <Router><Routes>
+    <Route path="/" element={<Mailroom />} />
+    <Route path="/gmail-connected" element={<Mailroom />} />
+    <Route path="/privacy" element={<Legal page="privacy" />} />
+    <Route path="/terms" element={<Legal page="terms" />} />
+  </Routes></Router>;
+}
+function Mailroom() {
   const auth = useAuth();
   if (forwardToCanonical) return null;
-  if (["/privacy", "/terms"].includes(location.pathname))
-    return <Legal page={location.pathname.slice(1)} />;
   return (
     <div className="min-h-screen bg-[#f3f6fb] font-sans text-[#23344e] selection:bg-blue-100">
       {auth.isLoading ? (
