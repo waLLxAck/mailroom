@@ -1,0 +1,15 @@
+{
+  "name": "mailroom-lakebed-pilot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npx --yes lakebed@0.0.34 build",
+    "dev": "npx --yes lakebed@0.0.34 dev --port 3002",
+    "test": "node --test tests/security.mjs",
+    "test:ui": "node tests/ui.mjs",
+    "deploy": "npx --yes lakebed@0.0.34 deploy"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}
