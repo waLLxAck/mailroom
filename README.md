@@ -70,7 +70,7 @@ Use the deployment ID for authenticated inspection; custom-domain credential dis
 
 Cloud project: `mailroom-509610`. The Mailroom Web client has the canonical callback `https://mailroom.lakebed.app/gmail-connected` registered, and the hosted server uses it. Public homepage, privacy and terms links are configured in Google Cloud. Google developer contact includes `svilen.petrov@eniks.ai`.
 
-The app has open account registration. Google Gmail OAuth was published to Production on September 25, 2026, using `svilen.petrov97@gmail.com` as its consent-screen contact with the operator's approval. Google still requires verification for restricted Gmail access; the console currently reports a 100-user cap. Broad Gmail distribution requires verification, including domain ownership and any requested restricted-scope assessment.
+The app has open account registration. Google Gmail OAuth was published to Production on September 25, 2026, using `svilen.petrov97@gmail.com` as its consent-screen contact with the operator's approval. Google still requires verification for restricted Gmail access; the console currently reports a 100-user cap. Google’s automated branding check currently blocks verification because `https://mailroom.lakebed.app` is not registered as owned by the operator. Broad Gmail distribution requires resolving domain ownership, then completing branding and restricted-scope verification and any requested assessment.
 
 ## License and contact
 
