@@ -65,6 +65,7 @@ function Mark() {
 export function App() {
   return <Router><Routes>
     <Route path="/" element={<Mailroom />} />
+    <Route path="/auth/callback" element={<Mailroom />} />
     <Route path="/gmail-connected" element={<Mailroom />} />
     <Route path="/privacy" element={<Legal page="privacy" />} />
     <Route path="/terms" element={<Legal page="terms" />} />

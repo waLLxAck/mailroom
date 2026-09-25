@@ -15,7 +15,7 @@ const { default: server } = await import(
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
   headless: true,
-  args: ["--no-sandbox"],
+  args: ["--no-sandbox", "--disable-gpu"],
 });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const auth = {
@@ -180,7 +180,8 @@ await page.routeWebSocket("**/__lakebed/ws*", (ws) => {
   });
 });
 try {
-  await page.goto(process.env.TEST_URL || "http://127.0.0.1:3002");
+  const baseUrl = process.env.TEST_URL || "http://127.0.0.1:3002";
+  await page.goto(baseUrl);
   await page
     .getByRole("button", { name: "Load emails", exact: true })
     .waitFor({ timeout: 5000 })
@@ -336,6 +337,12 @@ try {
     0,
   );
   assert.equal(accountStatus.settings.threshold, 80);
+  await page.goto(baseUrl + "/auth/callback");
+  await page.getByRole("heading", { name: "Your inbox, decided." }).waitFor({ timeout: 10000 });
+  await page.goto(baseUrl + "/auth/callback?code=invalid-test-code&state=invalid-test-state");
+  await page.getByRole("button", { name: "Sign in with Google" }).waitFor({ timeout: 10000 });
+  await page.getByRole("alert").filter({ hasText: "Start sign-in again" }).waitFor();
+  assert.equal(new URL(page.url()).search, "");
   assert.deepEqual(errors, []);
   console.log(
     "UI passed: progressive load, partial resume, count validation, inert email content, Noul results, measured timings, modal keyboard behavior, responsive widths.",
