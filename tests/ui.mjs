@@ -1,5 +1,17 @@
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const artifact = JSON.parse(
+  readFileSync(
+    new URL(
+      "../.lakebed/artifacts/mailroom-lakebed.claimed.json",
+      import.meta.url,
+    ),
+  ),
+);
+const { default: server } = await import(
+  "data:text/javascript;base64," + artifact.artifact.server.source.bundle
+);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
   headless: true,
@@ -56,28 +68,61 @@ let failPreview = true,
 await page.route("**/__lakebed/auth/**", (r) =>
   r.fulfill({ json: { auth, requireSignIn: false } }),
 );
+const initialSettings = (
+  await server.queries.status({
+    auth: { requireSignedIn: () => auth },
+    db: { accounts: { withIndex: () => ({ first: async () => null }) } },
+    env: {},
+  })
+).settings;
+const accountStatus = {
+  allowed: true,
+  needsEnrollment: false,
+  connected: true,
+  ready: true,
+  email: "owner@example.com",
+  remaining: 700,
+  hasApiKey: true,
+  settings: initialSettings,
+  settingsVersion: 0,
+};
 await page.routeWebSocket("**/__lakebed/ws*", (ws) => {
-  ws.onMessage((raw) => {
-    const m = JSON.parse(raw.toString());
-    if (m.op === "query.subscribe")
+  let subscription;
+  const sendStatus = () => {
+    if (subscription)
       ws.send(
         JSON.stringify({
           op: "query.result",
-          id: m.id,
-          name: m.name,
-          args: m.args,
-          data: {
-            allowed: true,
-            needsEnrollment: false,
-            connected: true,
-            ready: true,
-            email: "owner@example.com",
-            remaining: 700,
-          },
+          id: subscription.id,
+          name: subscription.name,
+          args: subscription.args,
+          data: accountStatus,
         }),
       );
+  };
+  ws.onMessage((raw) => {
+    const m = JSON.parse(raw.toString());
+    if (m.op === "query.subscribe") {
+      subscription = m;
+      sendStatus();
+    }
     if (m.op === "mutation.run") {
       let result = { ok: true };
+      if (m.name === "saveApiKey") {
+        assert.match(m.args[0], /^sk-or-/);
+        accountStatus.hasApiKey = true;
+        sendStatus();
+      }
+      if (m.name === "removeApiKey") {
+        accountStatus.hasApiKey = false;
+        sendStatus();
+      }
+      if (m.name === "saveSettings") {
+        accountStatus.settings = m.args[0];
+        accountStatus.settingsVersion++;
+        sendStatus();
+      }
+
       if (m.name === "list")
         result = { ok: true, ids: emails.map((e) => e.id), nextPageToken: "" };
       if (m.name === "previews")
@@ -105,20 +150,22 @@ await page.routeWebSocket("**/__lakebed/ws*", (ws) => {
           ok: true,
           result: {
             requestMs: 240,
+            settings: accountStatus.settings,
+            settingsVersion: accountStatus.settingsVersion,
             model: "typesafe/jev-1.13",
             answers: {
               ...Object.fromEntries(
-                [
-                  "should_reply",
-                  "is_spam",
-                  "is_phishing",
-                  "action_required",
-                  "has_deadline",
-                ].map((k) => [k, { type: "noul", noul: 0.04 }]),
+                accountStatus.settings.rules
+                  .filter((r) => r.enabled)
+                  .map((r) => r.id)
+                  .map((k) => [k, { type: "noul", noul: 0.04 }]),
               ),
               category: {
                 type: "choice",
-                choice: "marketing",
+                choice:
+                  accountStatus.settings.categories.length > 9
+                    ? accountStatus.settings.categories.at(-1).id
+                    : "marketing",
                 confidence: 0.98,
               },
               urgency: { type: "score", score: 0 },
@@ -208,6 +255,87 @@ try {
   await page.getByRole("dialog").waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: "test-results/mobile.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page
+    .getByRole("button", { name: "Connection and privacy settings" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByPlaceholder("sk-or-…").fill("sk-or-v1-" + "c".repeat(64));
+  await dialog
+    .getByRole("button", { name: "Save API key", exact: true })
+    .click();
+  await dialog.getByText("API key validated and saved securely.").waitFor();
+  assert.equal(await dialog.getByPlaceholder("sk-or-…").inputValue(), "");
+  await dialog.getByRole("button", { name: "Categories", exact: true }).click();
+  await dialog
+    .getByRole("button", { name: "Add category", exact: true })
+    .click();
+  await dialog.getByLabel("Category 10 name", { exact: true }).fill("Travel");
+  await dialog
+    .getByLabel("Category 10 description", { exact: true })
+    .fill("Trips, bookings, flights and hotels.");
+  await dialog
+    .getByRole("button", { name: "Save classification settings", exact: true })
+    .click();
+  await dialog
+    .getByText(
+      "Saved to your account. New classifications will use these settings.",
+    )
+    .waitFor();
+  await dialog
+    .getByRole("button", { name: "Classifications", exact: true })
+    .click();
+  await dialog
+    .getByRole("spinbutton", { name: /Confidence threshold/ })
+    .fill("80");
+  await dialog
+    .getByRole("group", { name: "Reply expected", exact: true })
+    .getByRole("checkbox")
+    .uncheck();
+  await dialog
+    .getByRole("button", { name: "Add classification question", exact: true })
+    .click();
+  const custom = dialog.getByRole("group").last();
+  await custom.getByLabel("Name", { exact: true }).fill("Travel plans");
+  await custom
+    .getByLabel("Question and instructions")
+    .fill("Does this email concern a trip?");
+  await custom
+    .getByLabel("When the answer is yes")
+    .fill("Flight or hotel bookings.");
+  await custom.getByLabel("When the answer is no").fill("No travel content.");
+  await page.screenshot({
+    path: "test-results/custom-settings.png",
+    fullPage: true,
+  });
+  await dialog
+    .getByRole("button", { name: "Save classification settings", exact: true })
+    .click();
+  await dialog
+    .getByText(
+      "Saved to your account. New classifications will use these settings.",
+    )
+    .waitFor();
+  await dialog.getByRole("button", { name: "Close settings" }).click();
+  await page
+    .getByRole("navigation", { name: "Categories", exact: true })
+    .getByRole("button", { name: "Travel", exact: true })
+    .waitFor();
+  await page
+    .getByRole("button", { name: "Classify again", exact: true })
+    .click();
+  await page
+    .locator('[aria-label="Jev decisions"]')
+    .getByText("Travel plans", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .locator('[aria-label="Jev decisions"]')
+      .getByText("Reply expected", { exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(accountStatus.settings.threshold, 80);
   assert.deepEqual(errors, []);
   console.log(
     "UI passed: progressive load, partial resume, count validation, inert email content, Noul results, measured timings, modal keyboard behavior, responsive widths.",

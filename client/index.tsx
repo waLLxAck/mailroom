@@ -8,10 +8,23 @@ import {
   useAuth,
 } from "lakebed/client";
 import type app from "../server/index";
-import { categories, verdict } from "../shared/email";
+import { defaults } from "../shared/settings";
+import { Settings } from "./Settings";
+import { Legal } from "./Legal";
 import { parseSelection, rangeLabel } from "../shared/mail-selection";
+// During domain migration, relay only to the canonical origin owned by this app.
+const forwardToCanonical =
+  [
+    "https://svilen-mailroom.lakebed.app",
+    "https://lucky-ridge-54fcc55777.lakebed.app",
+  ].includes(location.origin) &&
+  ["/", "/gmail-connected"].includes(location.pathname);
+if (forwardToCanonical)
+  location.replace(
+    "https://mailroom.lakebed.app" + location.pathname + location.search,
+  );
 const callback =
-  location.pathname === "/gmail-connected"
+  !forwardToCanonical && location.pathname === "/gmail-connected"
     ? new URLSearchParams(location.search)
     : null;
 if (callback) history.replaceState({}, "", "/");
@@ -48,6 +61,9 @@ function Mark() {
 }
 export function App() {
   const auth = useAuth();
+  if (forwardToCanonical) return null;
+  if (["/privacy", "/terms"].includes(location.pathname))
+    return <Legal page={location.pathname.slice(1)} />;
   return (
     <div className="min-h-screen bg-[#f3f6fb] font-sans text-[#23344e] selection:bg-blue-100">
       {auth.isLoading ? (
@@ -72,17 +88,17 @@ export function App() {
                 marketing.
               </p>
               <p className="mt-6 max-w-sm text-sm leading-relaxed text-slate-500">
-                A private Gmail pilot. Jev classifies your emails with
+                Your Gmail workspace. Jev classifies your emails with
                 probabilities you can inspect.
               </p>
             </section>
             <section className="self-center rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
               <h2 className="text-2xl font-semibold tracking-tight">
-                Your private workspace
+                Your personal workspace
               </h2>
               <p className="mb-6 mt-3 text-sm leading-6 text-slate-600">
-                Sign in with the owner account. You’ll connect Gmail separately
-                and choose which emails to classify.
+                Sign in with Google. You’ll connect Gmail separately and choose
+                which emails to classify.
               </p>
               {auth.error && (
                 <p role="alert" className="mb-4 text-sm text-red-700">
@@ -90,6 +106,15 @@ export function App() {
                 </p>
               )}
               <SignInWithGoogle className={primary} />
+              <p className="mt-4 text-xs text-slate-500">
+                <a className="underline" href="/privacy">
+                  Privacy
+                </a>{" "}
+                ·{" "}
+                <a className="underline" href="/terms">
+                  Terms
+                </a>{" · "}<a className="underline" href="https://github.com/waLLxAck/mailroom">Source code</a>
+              </p>
               {auth.error && (
                 <button
                   className={button + " ml-2"}
@@ -100,15 +125,15 @@ export function App() {
               )}
               <ul className="mt-8 space-y-3 border-t border-slate-100 pt-6 text-sm text-slate-600">
                 <li>Gmail access is read-only.</li>
-                <li>No email bodies stored in the hosted database.</li>
+                <li>Your API key and settings stay with your account.</li>
                 <li>
                   Classification sends selected email text to OpenRouter and
                   TypeSafe.
                 </li>
               </ul>
               <p className="mt-6 text-xs leading-5 text-slate-500">
-                Hosted on Lakebed’s public alpha. This is a pilot, not a
-                production service.
+                Bring your own OpenRouter key. Customize your categories and
+                decisions. Powered by Jev. Free and open source; no technical support.
               </p>
             </section>
           </div>
@@ -121,6 +146,10 @@ export function App() {
 }
 function Workspace() {
   const status = client.useQuery("status");
+  const config = status?.settings || defaults();
+  const categories = config.categories.map((c) => c.id);
+  const categoryLabel = (id: string) =>
+    config.categories.find((c) => c.id === id)?.label || id;
   const enroll = client.useMutation("enroll"),
     connect = client.useMutation("connect"),
     complete = client.useMutation("complete"),
@@ -167,13 +196,14 @@ function Workspace() {
     return () => clearInterval(timer);
   }, [run?.active]);
   useEffect(() => {
-    if (status?.needsEnrollment && !enrolling.current) {
-      enrolling.current = true;
+    if (!status || enrolling.current) return;
+    enrolling.current = true;
+    if (status.needsEnrollment) {
       enroll().catch(() => {
-        setError("Could not activate this private workspace. Reload to retry.");
+        setError("Could not activate your workspace. Reload to retry.");
       });
     }
-  }, [status?.needsEnrollment]);
+  }, [status]);
   useEffect(() => {
     if (
       !status?.allowed ||
@@ -219,6 +249,7 @@ function Workspace() {
         await sleep(Math.max(500, result.retryAfterMs));
         continue;
       }
+      if (result.code === "api_key_required") setPrivacy(true);
       throw new Error(result.error || "The request could not be completed.");
     }
   }
@@ -330,6 +361,11 @@ function Workspace() {
     }
   }
   async function classifyEmails(targets: any[]) {
+    if (!status?.hasApiKey) {
+      setPrivacy(true);
+      setError("Add your OpenRouter API key in Settings to classify emails.");
+      return;
+    }
     if (!targets.length || !begin("Classifying emails")) return;
     const start = Date.now();
     setClock(start);
@@ -386,7 +422,8 @@ function Workspace() {
     return (
       (filter === "All mail" ||
         (filter === "Needs reply"
-          ? a?.should_reply.noul >= 0.7
+          ? a?.should_reply?.noul >=
+            (e.classification?.settings?.threshold || 70) / 100
           : filter === "Unclassified"
             ? !a
             : a?.category.choice === filter)) &&
@@ -403,7 +440,12 @@ function Workspace() {
           done.reduce((s: number, x: any) => s + x.ms, 0) / done.length,
         )
       : 0;
-  const targets = emails.filter((e) => !e.classification);
+  const targets = emails.filter(
+    (e) =>
+      !e.classification ||
+      (e.classification.settingsVersion || 0) !==
+        (status?.settingsVersion || 0),
+  );
   let valid = true;
   try {
     parseSelection(selection);
@@ -421,10 +463,10 @@ function Workspace() {
       <main className="mx-auto max-w-lg px-6 py-24">
         <Mark />
         <h1 className="mt-8 text-3xl font-semibold">
-          This is a private workspace.
+          Sign in to your workspace.
         </h1>
         <p className="my-5 text-slate-600">
-          Sign in with the account invited to this Mailroom pilot.
+          Use your Google account to open Mailroom.
         </p>
         <button className={button} onClick={() => void signOut()}>
           Sign out
@@ -445,7 +487,7 @@ function Workspace() {
           className="mb-5 truncate px-2 text-xs text-slate-500"
           title={status.email}
         >
-          {status.email || "Your private workspace"}
+          {status.email || "Your personal workspace"}
         </p>
         <nav aria-label="Inbox filters">
           {["All mail", "Needs reply", "Unclassified"].map((f) => (
@@ -458,7 +500,7 @@ function Workspace() {
                   : "text-slate-600 hover:bg-slate-50")
               }
             >
-              {f}
+              {categoryLabel(f)}
               <span className="text-xs">
                 {f === "All mail"
                   ? emails.length
@@ -466,7 +508,8 @@ function Workspace() {
                     ? targets.length
                     : emails.filter(
                         (e) =>
-                          e.classification?.answers.should_reply.noul >= 0.7,
+                          e.classification?.answers.should_reply?.noul >=
+                          (e.classification?.settings?.threshold || 70) / 100,
                       ).length}
               </span>
             </button>
@@ -484,7 +527,7 @@ function Workspace() {
                   : "text-slate-600 hover:bg-slate-50")
               }
             >
-              {f}
+              {categoryLabel(f)}
               <span className="text-xs">
                 {emails.filter(
                   (e) => e.classification?.answers.category.choice === f,
@@ -500,7 +543,7 @@ function Workspace() {
           >
             Connection & privacy
           </button>
-          <p className="px-3 pt-2 text-xs text-slate-400">Lakebed pilot</p>
+          <p className="px-3 pt-2 text-xs text-slate-400">Powered by Jev</p>
         </div>
       </aside>
       <main className="min-w-0 flex-1 px-4 py-6 md:px-8 lg:px-10">
@@ -574,7 +617,7 @@ function Workspace() {
         {!status.ready && (
           <p className="mb-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-900">
             Server setup is not complete yet. Gmail connection will become
-            available when the pilot is configured.
+            available when the service is configured.
           </p>
         )}
         {error && (
@@ -805,7 +848,7 @@ function Workspace() {
         </section>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-sm font-semibold capitalize">
-            {filter}{" "}
+            {categoryLabel(filter)}{" "}
             <span className="ml-2 text-xs font-normal text-slate-500">
               {visible.length}
             </span>
@@ -819,7 +862,7 @@ function Workspace() {
             >
               {["All mail", "Needs reply", "Unclassified", ...categories].map(
                 (c) => (
-                  <option>{c}</option>
+                  <option value={c}>{categoryLabel(c)}</option>
                 ),
               )}
             </select>
@@ -874,21 +917,28 @@ function Workspace() {
                   </p>
                   <div className="mt-4 flex flex-wrap items-center gap-2 text-[10px]">
                     <span className="rounded border border-slate-200 bg-white px-2 py-1 capitalize text-slate-600">
-                      {email.classification?.answers.category.choice ||
-                        "Unclassified"}
+                      {categoryLabel(
+                        email.classification?.answers.category.choice,
+                      ) || "Unclassified"}
                     </span>
-                    {email.classification && (
+                    {email.classification?.answers.should_reply && (
                       <span
                         className={
-                          email.classification.answers.should_reply.noul >= 0.7
+                          email.classification.answers.should_reply?.noul >=
+                          (email.classification?.settings?.threshold || 70) /
+                            100
                             ? "text-blue-700"
                             : "text-slate-500"
                         }
                       >
-                        {email.classification.answers.should_reply.noul >= 0.7
+                        {email.classification.answers.should_reply?.noul >=
+                        (email.classification?.settings?.threshold || 70) / 100
                           ? "Reply likely needed"
-                          : email.classification.answers.should_reply.noul <=
-                              0.3
+                          : email.classification.answers.should_reply?.noul <=
+                              1 -
+                                (email.classification.settings?.threshold ||
+                                  70) /
+                                  100
                             ? "No reply expected"
                             : "Reply uncertain"}
                       </span>
@@ -992,17 +1042,20 @@ function Workspace() {
           </div>
         </section>
         <footer className="flex flex-wrap justify-between gap-3 py-6 text-xs leading-5 text-slate-500">
-          <span>Read-only Gmail · TypeSafe Jev · Lakebed alpha pilot</span>
+          <span>
+            Read-only Gmail · TypeSafe Jev · Powered by Jev · Public beta
+          </span>
           <button className="text-blue-700" onClick={() => setPrivacy(true)}>
             Privacy & limits
           </button>
         </footer>
       </main>
       {privacy && (
-        <Privacy
+        <Settings
           connected={status.connected}
           busy={!!busy}
-          remaining={status.remaining}
+          status={status}
+          onSaved={() => setFilter("All mail")}
           close={() => setPrivacy(false)}
           disconnect={() => void removeConnection()}
           reconnect={() => void connectGmail()}
@@ -1043,64 +1096,69 @@ function Decisions({
       </div>
       {a ? (
         <>
-          <div className="mt-6 flex items-end justify-between gap-4">
-            <div>
-              <p className="text-xs text-slate-500">Should I reply?</p>
-              <p className="mt-2 text-sm font-semibold">
-                {a.should_reply.noul >= 0.7
-                  ? "Reply likely needed"
-                  : a.should_reply.noul <= 0.3
-                    ? "No reply expected"
-                    : "Uncertain — review this email"}
-              </p>
-            </div>
-            <strong className="text-3xl font-semibold text-blue-700">
-              {Math.round(a.should_reply.noul * 100)}%
-            </strong>
+          <div className="mt-5 grid grid-cols-2 gap-5">
+            {(result.settings || defaults()).rules
+              .filter((r) => r.enabled && a[r.id])
+              .map((r) => {
+                const probability = a[r.id].noul,
+                  threshold = (result.settings?.threshold || 70) / 100;
+                const label =
+                  probability >= threshold
+                    ? "Likely"
+                    : probability <= 1 - threshold
+                      ? "Unlikely"
+                      : "Uncertain";
+                return (
+                  <div
+                    key={r.id}
+                    className={
+                      r.id === "should_reply"
+                        ? "col-span-2 border-b border-blue-100 pb-4"
+                        : ""
+                    }
+                    title={r.instructions}
+                  >
+                    <p className="text-xs text-slate-500">{r.label}</p>
+                    <div className="mt-2 flex items-end justify-between gap-3">
+                      <strong className="text-2xl font-semibold text-blue-700">
+                        {Math.round(probability * 100)}%
+                      </strong>
+                      <span className="text-xs">
+                        {r.id === "should_reply"
+                          ? label === "Likely"
+                            ? "Reply likely needed"
+                            : label === "Unlikely"
+                              ? "No reply expected"
+                              : "Reply uncertain"
+                          : label}
+                      </span>
+                    </div>
+                    <div
+                      role="progressbar"
+                      aria-label={r.label + " probability"}
+                      aria-valuenow={Math.round(probability * 100)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      className="mt-3 h-1 overflow-hidden rounded bg-blue-100"
+                    >
+                      <div
+                        className="h-full bg-blue-600"
+                        style={{ width: `${probability * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
           </div>
-          <p className="mt-2 text-right text-[10px] text-slate-500">
+          <p className="mt-3 text-[10px] text-slate-500">
             Noul · probability of yes
           </p>
-          <div
-            role="progressbar"
-            aria-label="Reply probability"
-            aria-valuenow={Math.round(a.should_reply.noul * 100)}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            className="mt-2 h-1 overflow-hidden rounded bg-blue-100"
-          >
-            <div
-              className="h-full bg-blue-600"
-              style={{ width: `${a.should_reply.noul * 100}%` }}
-            />
-          </div>
-          <div className="mt-6 grid grid-cols-2 gap-5 xl:grid-cols-4">
-            {[
-              ["is_spam", "Spam"],
-              ["is_phishing", "Phishing"],
-              ["action_required", "Action required"],
-              ["has_deadline", "Personal deadline"],
-            ].map(([key, label]) => (
-              <div
-                title={
-                  key === "has_deadline"
-                    ? "An explicit due time for something you are expected to do. Sale expiry and newsletter dates do not count."
-                    : `${label}: probability of yes`
-                }
-              >
-                <p className="text-[11px] text-slate-500">{label}</p>
-                <strong className="mt-2 block text-lg font-medium">
-                  {Math.round(a[key].noul * 100)}%
-                </strong>
-                <p className="mt-1 text-[10px] text-slate-500">
-                  {verdict(a[key].noul)}
-                </p>
-              </div>
-            ))}
-          </div>
-          <div className="mt-6 flex flex-wrap justify-between gap-3 border-t border-blue-100 pt-4 text-xs">
-            <span className="capitalize">
-              {a.category.choice} · {Math.round(a.category.confidence * 100)}%
+          <div className="mt-5 flex flex-wrap justify-between gap-3 border-t border-blue-100 pt-4 text-xs">
+            <span>
+              {(result.settings || defaults()).categories.find(
+                (c) => c.id === a.category.choice,
+              )?.label || a.category.choice}{" "}
+              · {Math.round(a.category.confidence * 100)}%
             </span>
             <span>Urgency {a.urgency.score.toFixed(1)} / 4</span>
           </div>
@@ -1118,8 +1176,7 @@ function Decisions({
         </>
       ) : (
         <p className="my-5 text-sm leading-6 text-slate-500">
-          Classify this email to see reply, spam, category and deadline
-          probabilities.
+          Classify this email using your saved categories and questions.
         </p>
       )}
       <button
@@ -1133,122 +1190,5 @@ function Decisions({
         Probabilities are guidance. Check the email before acting.
       </p>
     </section>
-  );
-}
-function Privacy({
-  close,
-  connected,
-  busy,
-  disconnect,
-  reconnect,
-  remaining,
-}: any) {
-  const ref = useRef<HTMLElement>(null);
-  useLayoutEffect(() => {
-    const before = document.activeElement as HTMLElement;
-    ref.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    function key(e: KeyboardEvent) {
-      if (e.key === "Escape") close();
-      if (e.key === "Tab") {
-        const nodes = Array.from(
-          ref.current?.querySelectorAll<HTMLElement>(
-            "button:not(:disabled), a[href]",
-          ) || [],
-        );
-        const first = nodes[0],
-          last = nodes[nodes.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last?.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first?.focus();
-        }
-      }
-    }
-    document.addEventListener("keydown", key);
-    return () => {
-      document.removeEventListener("keydown", key);
-      before?.focus();
-    };
-  }, []);
-  return (
-    <div
-      className="fixed inset-0 z-50 grid place-items-center overflow-auto bg-slate-900/35 p-4"
-      onClick={close}
-    >
-      <section
-        ref={ref}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="privacy-title"
-        onClick={(e) => e.stopPropagation()}
-        className="my-auto max-h-[90vh] w-full max-w-lg overflow-auto rounded-2xl bg-white p-7 shadow-xl"
-      >
-        <div className="flex items-center justify-between gap-4">
-          <h2 id="privacy-title" className="text-xl font-semibold">
-            Connection & privacy
-          </h2>
-          <button className="p-2" aria-label="Close settings" onClick={close}>
-            ×
-          </button>
-        </div>
-        <div className="mt-5 space-y-4 text-sm leading-6 text-slate-600">
-          <p>
-            Mailroom can read your Gmail inbox. It cannot send replies, delete
-            messages, or change labels.
-          </p>
-          <p>
-            When you classify an email, its sender, subject, date and up to
-            24,000 characters of cleaned text are sent to OpenRouter and
-            TypeSafe Jev. Classification uses your configured OpenRouter account
-            and credits.
-          </p>
-          <p>
-            Email content and decisions stay in this tab’s memory and clear when
-            you reload or sign out. The hosted database stores your account ID
-            and encrypted Gmail tokens. Disconnect deletes those tokens; you can
-            also revoke access in your Google account.
-          </p>
-          <p>
-            This Lakebed alpha pilot has a 700-call daily app budget, with{" "}
-            {remaining ?? "—"} calls remaining. Each call may load five previews
-            or classify one email. The platform also has daily limits. Work
-            pauses safely when a limit is reached.
-          </p>
-          <p className="text-xs">
-            Lakebed’s platform is not production-ready. Hosted data may be
-            retained in platform backups or operational records.
-          </p>
-        </div>
-        <div className="mt-6 flex flex-wrap gap-3">
-          {connected && (
-            <button disabled={busy} className={button} onClick={reconnect}>
-              Reconnect Gmail
-            </button>
-          )}
-          {connected && (
-            <button disabled={busy} className={button} onClick={disconnect}>
-              Disconnect Gmail
-            </button>
-          )}
-          <button
-            disabled={busy}
-            className={button}
-            onClick={() => void signOut()}
-          >
-            Sign out
-          </button>
-          <a
-            className={button}
-            rel="noopener noreferrer"
-            target="_blank"
-            href="https://myaccount.google.com/connections"
-          >
-            Google access settings ↗
-          </a>
-        </div>
-      </section>
-    </div>
   );
 }

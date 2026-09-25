@@ -20,16 +20,34 @@ function fixture(
     emailVerified: true,
   },
 ) {
-  let row = null;
+  const rows = [];
   const db = {
     accounts: {
-      withIndex() {
-        return { first: async () => (row ? { ...row } : null) };
+      withIndex(name, callback) {
+        const filters = {};
+        const q = {
+          eq(k, v) {
+            filters[k] = v;
+            return q;
+          },
+        };
+        callback(q);
+        return {
+          first: async () => {
+            const row = rows.find((r) =>
+              Object.entries(filters).every(([k, v]) => r[k] === v),
+            );
+            return row ? { ...row } : null;
+          },
+        };
       },
       insert: async (value) => {
-        row = {
-          id: "row",
+        const row = {
+          id: "row" + rows.length,
           tokens: "",
+          apiKey: "",
+          settings: "",
+          settingsVersion: 0,
           oauth: "",
           oauthExpires: 0,
           nextAt: 0,
@@ -37,11 +55,19 @@ function fixture(
           requests: 0,
           ...value,
         };
-        return "row";
+        rows.push(row);
+        return row.id;
       },
       update: async (id, value) => {
-        assert.equal(id, "row");
-        row = { ...row, ...value };
+        const index = rows.findIndex((r) => r.id === id);
+        assert.ok(index >= 0);
+        rows[index] = { ...rows[index], ...value };
+      },
+      delete: async (id) => {
+        rows.splice(
+          rows.findIndex((r) => r.id === id),
+          1,
+        );
       },
     },
   };
@@ -54,24 +80,21 @@ function fixture(
     },
     db,
     env: {
-      OWNER_EMAIL: "owner@example.com",
       APP_URL: "https://mail.example.com",
       GOOGLE_CLIENT_ID: "client",
       GOOGLE_CLIENT_SECRET: "secret",
-      OPENROUTER_API_KEY: "key",
+      OPENROUTER_API_KEY: "forbidden-shared-key",
       DATA_ENCRYPTION_KEY: secret,
     },
   };
   return {
     ctx,
+    rows,
     get row() {
-      return row;
+      return rows.find((r) => r.ownerId === identity?.userId);
     },
     as(next) {
-      ctx.auth.requireSignedIn = () => {
-        if (!next) throw new Error("Sign in required");
-        return next;
-      };
+      identity = next;
     },
   };
 }
@@ -102,7 +125,7 @@ test("all private operations reject guests before provider access", async () => 
     restore();
   }
 });
-test("owner invitation requires verified email, pins immutable ID, rejects an account sharing its email", async () => {
+test("public enrollment requires a verified email and isolates accounts by immutable ID", async () => {
   const f = fixture({
     userId: "attacker",
     email: "owner@example.com",
@@ -111,11 +134,14 @@ test("owner invitation requires verified email, pins immutable ID, rejects an ac
   await assert.rejects(() => app.mutations.enroll(f.ctx));
   f.as({ userId: "owner", email: "owner@example.com", emailVerified: true });
   await app.mutations.enroll(f.ctx);
-  assert.equal(f.row.ownerId, "owner");
+  const ownerRow = f.row;
   f.as({ userId: "other-id", email: "owner@example.com", emailVerified: true });
-  await assert.rejects(() => app.mutations.enroll(f.ctx));
+  assert.equal((await app.queries.status(f.ctx)).needsEnrollment, true);
   await assert.rejects(() => app.mutations.read(f.ctx, "12345678"));
-  assert.equal((await app.queries.status(f.ctx)).allowed, false);
+  await app.mutations.enroll(f.ctx);
+  assert.notEqual(f.row.id, ownerRow.id);
+  assert.equal(f.rows.length, 2);
+  assert.equal(f.row.ownerId, "other-id");
 });
 test("OAuth uses unique PKCE state, encrypts tokens, rejects state replay, and disconnect deletes credentials", async () => {
   const f = fixture();
@@ -248,7 +274,7 @@ test("rate and daily budgets stop provider requests; decrypted tokens never reac
       "rate_limit",
     );
     assert.equal(calls, before);
-    await f.ctx.db.accounts.update("row", {
+    await f.ctx.db.accounts.update(f.row.id, {
       nextAt: 0,
       day: new Date().toISOString().slice(0, 10),
       requests: 700,
@@ -281,6 +307,7 @@ test("classification returns validated Noul values and measured timing, rejects 
     urgency: { type: "score", score: 0 },
   };
   const restore = providerMock(async (url, options) => {
+    if (String(url).endsWith("/api/v1/key")) return response({ data: {} });
     if (String(url).includes("/token"))
       return response({
         access_token: "access",
@@ -319,13 +346,188 @@ test("classification returns validated Noul values and measured timing, rejects 
       "code",
       new URL(url).searchParams.get("state"),
     );
+    assert.equal(
+      (await app.mutations.saveApiKey(f.ctx, "sk-or-v1-" + "a".repeat(64))).ok,
+      true,
+    );
     const result = await app.mutations.classify(f.ctx, "12345678");
     assert.equal(result.ok, true);
     assert.equal(result.result.answers.has_deadline.noul, 0.04);
     assert.ok(result.result.requestMs >= 0);
     assert.equal(f.row.body, undefined);
-    await f.ctx.db.accounts.update("row", { nextAt: 0 });
+    await f.ctx.db.accounts.update(f.row.id, { nextAt: 0 });
     invalid = true;
+    assert.equal((await app.mutations.classify(f.ctx, "12345678")).ok, false);
+  } finally {
+    restore();
+  }
+});
+test("personal API keys are encrypted, write-only, independent, removable, and never fall back to the server key", async () => {
+  const f = fixture();
+  await app.mutations.enroll(f.ctx);
+  let keyCalls = [];
+  const restore = providerMock(async (url, opts) => {
+    keyCalls.push(opts.headers.Authorization);
+    return response({ data: {} });
+  });
+  const aliceKey = "sk-or-v1-" + "a".repeat(64),
+    bobKey = "sk-or-v1-" + "b".repeat(64);
+  try {
+    assert.equal(
+      (await app.mutations.classify(f.ctx, "12345678")).code,
+      "api_key_required",
+    );
+    assert.equal(keyCalls.length, 0);
+    assert.equal((await app.mutations.saveApiKey(f.ctx, aliceKey)).ok, true);
+    const encrypted = f.row.apiKey;
+    assert.ok(!encrypted.includes(aliceKey));
+    assert.equal((await app.queries.status(f.ctx)).hasApiKey, true);
+    assert.ok(
+      !JSON.stringify(await app.queries.status(f.ctx)).includes(aliceKey),
+    );
+    f.as({ userId: "bob", email: "bob@example.com", emailVerified: true });
+    await app.mutations.enroll(f.ctx);
+    assert.equal((await app.queries.status(f.ctx)).hasApiKey, false);
+    assert.equal(
+      (await app.mutations.classify(f.ctx, "12345678")).code,
+      "api_key_required",
+    );
+    await app.mutations.saveApiKey(f.ctx, bobKey);
+    assert.notEqual(f.row.apiKey, encrypted);
+    await app.mutations.removeApiKey(f.ctx);
+    assert.equal(f.row.apiKey, "");
+    f.as({ userId: "owner", email: "owner@example.com", emailVerified: true });
+    assert.equal(f.row.apiKey, encrypted);
+    assert.deepEqual(keyCalls, [`Bearer ${aliceKey}`, `Bearer ${bobKey}`]);
+    await app.mutations.deleteAccount(f.ctx);
+    assert.equal(f.rows.length, 1);
+    assert.equal(f.rows[0].ownerId, "bob");
+  } finally {
+    restore();
+  }
+});
+test("settings are isolated, versioned, bounded, and accept custom categories and disabled questions", async () => {
+  const f = fixture();
+  await app.mutations.enroll(f.ctx);
+  const config = (await app.queries.status(f.ctx)).settings;
+  config.categories.push({
+    id: "receipts",
+    label: "Receipts",
+    description: "Purchase receipts and proof of payment.",
+  });
+  config.rules[0].enabled = false;
+  config.rules.push({
+    id: "travel",
+    label: "Travel plans",
+    instructions: "Does this email concern travel?",
+    yes: "Tickets, bookings or an itinerary.",
+    no: "No travel content.",
+    enabled: true,
+  });
+  config.threshold = 80;
+  assert.equal((await app.mutations.saveSettings(f.ctx, config, 0)).ok, true);
+  assert.equal(
+    (await app.queries.status(f.ctx)).settings.categories.at(-1).id,
+    "receipts",
+  );
+  assert.equal((await app.mutations.saveSettings(f.ctx, config, 0)).ok, false);
+  assert.equal(
+    (await app.mutations.saveSettings(f.ctx, { ...config, categories: [] }, 1))
+      .ok,
+    false,
+  );
+  assert.equal(
+    (await app.mutations.saveSettings(f.ctx, { ...config, threshold: 10 }, 1))
+      .ok,
+    false,
+  );
+  f.as({ userId: "bob", email: "bob@example.com", emailVerified: true });
+  await app.mutations.enroll(f.ctx);
+  assert.equal(
+    (await app.queries.status(f.ctx)).settings.rules.some(
+      (r) => r.id === "travel",
+    ),
+    false,
+  );
+  assert.equal((await app.queries.status(f.ctx)).settingsVersion, 0);
+});
+test("custom questions reach Jev, disabled questions are omitted, and custom categories are validated", async () => {
+  const f = fixture();
+  await app.mutations.enroll(f.ctx);
+  const config = (await app.queries.status(f.ctx)).settings;
+  config.rules.forEach((r) => (r.enabled = false));
+  config.rules.push({
+    id: "travel",
+    label: "Travel plans",
+    instructions: "Is this travel related?",
+    yes: "Travel booking.",
+    no: "Unrelated content.",
+    enabled: true,
+  });
+  config.categories = [
+    { id: "bookings", label: "Bookings", description: "Travel reservations." },
+    { id: "other", label: "Other", description: "All other mail." },
+  ];
+  await app.mutations.saveSettings(f.ctx, config, 0);
+  const { url } = await app.mutations.connect(f.ctx);
+  let wrongCategory = false;
+  const restore = providerMock(async (url, options) => {
+    if (String(url).endsWith("/api/v1/key")) return response({ data: {} });
+    if (String(url).endsWith("/token"))
+      return response({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_in: 3600,
+      });
+    if (String(url).endsWith("/profile"))
+      return response({ emailAddress: "owner@example.com" });
+    if (String(url).includes("openrouter")) {
+      const request = JSON.parse(options.body);
+      assert.equal(request.questions.should_reply, undefined);
+      assert.equal(request.questions.travel.type, "noul");
+      assert.match(
+        request.questions.category.criteria.bookings,
+        /Travel reservations/,
+      );
+      return response({
+        answers: {
+          travel: { type: "noul", noul: 0.95 },
+          category: {
+            type: "choice",
+            choice: wrongCategory ? "unknown" : "bookings",
+            confidence: 0.96,
+          },
+          urgency: { type: "score", score: 0 },
+        },
+      });
+    }
+    return response({
+      id: "12345678",
+      payload: {
+        mimeType: "text/plain",
+        headers: [],
+        body: {
+          data: Buffer.from("Flight booking confirmation").toString(
+            "base64url",
+          ),
+        },
+      },
+    });
+  });
+  try {
+    await app.mutations.complete(
+      f.ctx,
+      "code",
+      new URL(url).searchParams.get("state"),
+    );
+    await app.mutations.saveApiKey(f.ctx, "sk-or-v1-" + "c".repeat(64));
+    const result = await app.mutations.classify(f.ctx, "12345678");
+    assert.equal(result.ok, true);
+    assert.equal(result.result.answers.travel.noul, 0.95);
+    assert.equal(result.result.answers.should_reply, undefined);
+    assert.equal(result.result.settingsVersion, 1);
+    await f.ctx.db.accounts.update(f.row.id, { nextAt: 0 });
+    wrongCategory = true;
     assert.equal((await app.mutations.classify(f.ctx, "12345678")).ok, false);
   } finally {
     restore();

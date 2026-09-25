@@ -30,6 +30,12 @@ export async function fetchJson(
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const reason = data?.error?.errors?.[0]?.reason;
+    const openRouter = url.startsWith("https://openrouter.ai/");
+    if (openRouter && [401, 402, 403].includes(response.status))
+      throw new ProviderError(
+        "Check your OpenRouter key, credits and Jev access in Settings.",
+        "api_key_required",
+      );
     if (
       response.status === 429 ||
       ["rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"].includes(
@@ -37,7 +43,7 @@ export async function fetchJson(
       )
     )
       throw new ProviderError(
-        "Gmail is limiting requests. Your loaded emails are still here.",
+        `${openRouter ? "OpenRouter" : "Gmail"} is limiting requests. Your loaded emails are still here.`,
         "rate_limit",
         Math.max(
           5000,

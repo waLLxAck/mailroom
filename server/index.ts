@@ -12,25 +12,29 @@ import {
 } from "lakebed/server";
 import { random, digest, encrypt, decrypt } from "./crypto";
 import { fetchJson, ProviderError, metadata, emailBody } from "./gmail";
-import { questions } from "./questions";
-import { validateAnswers, messageId } from "../shared/email";
+import {
+  readSettings,
+  validateSettings,
+  buildQuestions,
+  validateResult,
+} from "../shared/settings";
+import { messageId } from "../shared/email";
 import { parseSelection, queryForSelection } from "../shared/mail-selection";
 
-// Native Lakebed identity is required in every data handler, then matched to the pinned owner.
+// Native Lakebed identity is required in every data handler, then scoped to the signed-in account.
 async function owner(ctx: any) {
   const identity = ctx.auth.requireSignedIn();
   const row = await ctx.db.accounts
-    .withIndex("by_slot", (q: any) => q.eq("slot", "owner"))
+    .withIndex("by_owner", (q: any) => q.eq("ownerId", identity.userId))
     .first();
   if (!row || row.ownerId !== identity.userId)
-    throw new Error("This private pilot is restricted to its owner.");
+    throw new Error("Set up your Mailroom account first.");
   return row;
 }
 function configured(ctx: any) {
   return Boolean(
     ctx.env.GOOGLE_CLIENT_ID &&
       ctx.env.GOOGLE_CLIENT_SECRET &&
-      ctx.env.OPENROUTER_API_KEY &&
       ctx.env.DATA_ENCRYPTION_KEY &&
       ctx.env.APP_URL,
   );
@@ -40,6 +44,14 @@ function appOrigin(ctx: any) {
   if (url.protocol !== "https:")
     throw new Error("Secure hosting is not configured.");
   return url.origin;
+}
+function googleRedirect(ctx: any) {
+  const url = new URL(
+    ctx.env.GMAIL_REDIRECT_URI || `${appOrigin(ctx)}/gmail-connected`,
+  );
+  if (url.protocol !== "https:")
+    throw new Error("Secure Google callback is not configured.");
+  return url.href;
 }
 function fail(error: any) {
   return {
@@ -64,7 +76,7 @@ async function paced(ctx: ServerContext, row: any, cost = 1) {
     requests = row.day === day ? row.requests : 0;
   if (requests >= 700)
     throw new ProviderError(
-      "This pilot’s daily request allowance is used. It resets at midnight UTC.",
+      "Your daily request allowance is used. It resets at midnight UTC.",
       "daily_limit",
     );
   await ctx.db.accounts.update(row.id, {
@@ -116,43 +128,40 @@ const gmail = (access: string, path: string) =>
 
 export default capsule({
   name: "Mailroom",
-  auth: { requireSignIn: true }, // Lakebed protects every data route; handlers additionally enforce the pinned owner.
+  auth: { requireSignIn: true }, // Lakebed protects every data route; handlers additionally enforce account ownership.
   schema: {
     accounts: table({
       slot: string(),
       ownerId: userId(),
       email: string(),
       tokens: string().default(""),
+      apiKey: string().default(""),
+      settings: string().default(""),
+      settingsVersion: number().default(0),
       oauth: string().default(""),
       oauthExpires: number().default(0),
       nextAt: number().default(0),
       day: string().default(""),
       requests: number().default(0),
-    }).index("by_slot", ["slot"]),
+    })
+      .index("by_slot", ["slot"])
+      .index("by_owner", ["ownerId"]),
   },
   queries: {
     status: query(async (ctx) => {
       const identity = ctx.auth.requireSignedIn();
       const row = await ctx.db.accounts
-        .withIndex("by_slot", (q) => q.eq("slot", "owner"))
+        .withIndex("by_owner", (q) => q.eq("ownerId", identity.userId))
         .first();
-      if (row && row.ownerId !== identity.userId)
-        return {
-          allowed: false,
-          needsEnrollment: false,
-          connected: false,
-          ready: false,
-          email: "",
-        };
-      const invited =
-        identity.emailVerified === true &&
-        identity.email?.toLowerCase() === ctx.env.OWNER_EMAIL?.toLowerCase();
       return {
-        allowed: Boolean(row) || invited,
-        needsEnrollment: !row && invited,
+        allowed: true,
+        needsEnrollment: !row,
         connected: Boolean(row?.tokens),
         ready: configured(ctx),
-        email: row?.email || "",
+        email: row?.email || identity.email || "",
+        hasApiKey: Boolean(row?.apiKey),
+        settings: readSettings(row?.settings),
+        settingsVersion: row?.settingsVersion || 0,
         remaining:
           row?.day === new Date().toISOString().slice(0, 10)
             ? Math.max(0, 700 - row.requests)
@@ -164,24 +173,80 @@ export default capsule({
     enroll: mutation(async (ctx) => {
       const identity = ctx.auth.requireSignedIn();
       const existing = await ctx.db.accounts
-        .withIndex("by_slot", (q) => q.eq("slot", "owner"))
+        .withIndex("by_owner", (q) => q.eq("ownerId", identity.userId))
         .first();
       if (existing) {
         if (existing.ownerId !== identity.userId)
           throw new Error("Access denied.");
         return { ok: true };
       }
-      if (
-        !ctx.env.OWNER_EMAIL ||
-        !identity.emailVerified ||
-        identity.email?.toLowerCase() !== ctx.env.OWNER_EMAIL.toLowerCase()
-      )
-        throw new Error("Access denied.");
+      if (!identity.emailVerified || !identity.email)
+        throw new Error("Sign in with a verified Google email address.");
       await ctx.db.accounts.insert({
-        slot: "owner",
+        slot: identity.userId,
         ownerId: identity.userId,
         email: identity.email,
       });
+      return { ok: true };
+    }),
+    saveApiKey: mutation(async (ctx, key: string) => {
+      const row = await owner(ctx);
+      if (
+        typeof key !== "string" ||
+        key.length < 20 ||
+        key.length > 512 ||
+        !/^sk-or-[A-Za-z0-9_-]+$/.test(key)
+      )
+        return { ok: false, error: "Enter a valid OpenRouter API key." };
+      try {
+        await fetchJson(
+          "https://openrouter.ai/api/v1/key",
+          { headers: { Authorization: `Bearer ${key}` } },
+          2000,
+        );
+        await ctx.db.accounts.update(row.id, {
+          apiKey: await encrypt(
+            key,
+            ctx.env.DATA_ENCRYPTION_KEY,
+            `${row.ownerId}:openrouter`,
+          ),
+        });
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error:
+            "OpenRouter could not validate this key. Check the key and try again.",
+        };
+      }
+    }),
+    removeApiKey: mutation(async (ctx) => {
+      const row = await owner(ctx);
+      await ctx.db.accounts.update(row.id, { apiKey: "" });
+      return { ok: true };
+    }),
+    saveSettings: mutation(async (ctx, input: any, version: number) => {
+      const row = await owner(ctx);
+      if (version !== (row.settingsVersion || 0))
+        return {
+          ok: false,
+          error:
+            "Settings changed in another tab. Close and reopen settings before saving.",
+        };
+      try {
+        const settings = validateSettings(input);
+        await ctx.db.accounts.update(row.id, {
+          settings: JSON.stringify(settings),
+          settingsVersion: (row.settingsVersion || 0) + 1,
+        });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    }),
+    deleteAccount: mutation(async (ctx) => {
+      const row = await owner(ctx);
+      await ctx.db.accounts.delete(row.id);
       return { ok: true };
     }),
     connect: mutation(async (ctx) => {
@@ -189,7 +254,7 @@ export default capsule({
       if (!configured(ctx))
         return {
           ok: false,
-          error: "The pilot is awaiting server configuration.",
+          error: "Gmail is awaiting server configuration.",
         };
       const state = random(),
         verifier = random();
@@ -203,7 +268,7 @@ export default capsule({
       });
       const params = new URLSearchParams({
         client_id: ctx.env.GOOGLE_CLIENT_ID,
-        redirect_uri: `${appOrigin(ctx)}/gmail-connected`,
+        redirect_uri: googleRedirect(ctx),
         response_type: "code",
         scope: "https://www.googleapis.com/auth/gmail.readonly",
         access_type: "offline",
@@ -249,7 +314,7 @@ export default capsule({
               code_verifier: pending.verifier,
               client_id: ctx.env.GOOGLE_CLIENT_ID,
               client_secret: ctx.env.GOOGLE_CLIENT_SECRET,
-              redirect_uri: `${appOrigin(ctx)}/gmail-connected`,
+              redirect_uri: googleRedirect(ctx),
               grant_type: "authorization_code",
             }).toString(),
           },
@@ -262,7 +327,7 @@ export default capsule({
         const profile = await gmail(data.access_token, "profile");
         if (profile.emailAddress?.toLowerCase() !== row.email.toLowerCase())
           throw new ProviderError(
-            "Connect the same Gmail account that owns this pilot.",
+            "Connect the same Gmail account you used to sign in.",
           );
         await ctx.db.accounts.update(row.id, {
           tokens: await encrypt(
@@ -356,6 +421,17 @@ export default capsule({
       const row = await owner(ctx);
       try {
         messageId(id);
+        if (!row.apiKey)
+          throw new ProviderError(
+            "Add your OpenRouter key in Settings before classifying.",
+            "api_key_required",
+          );
+        const apiKey = await decrypt(
+          row.apiKey,
+          ctx.env.DATA_ENCRYPTION_KEY,
+          `${row.ownerId}:openrouter`,
+        );
+        const settings = readSettings(row.settings);
         await paced(ctx, row, 2);
         const access = await token(ctx, row);
         const data = await gmail(access, `messages/${id}?format=full`),
@@ -366,7 +442,7 @@ export default capsule({
           {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${ctx.env.OPENROUTER_API_KEY}`,
+              Authorization: `Bearer ${apiKey}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
@@ -380,7 +456,7 @@ export default capsule({
                   body: email.body,
                 },
               },
-              questions,
+              questions: buildQuestions(settings),
             }),
           },
           1800,
@@ -388,7 +464,9 @@ export default capsule({
         return {
           ok: true,
           result: {
-            answers: validateAnswers(result.answers),
+            answers: validateResult(result.answers, settings),
+            settings,
+            settingsVersion: row.settingsVersion || 0,
             requestMs: Date.now() - start,
             classifiedAt: new Date().toISOString(),
             inputTruncated: email.inputTruncated,
@@ -403,7 +481,7 @@ export default capsule({
   endpoints: {
     health: endpoint({ method: "GET", path: "/healthz", readOnly: true }, () =>
       json(
-        { ok: true, stage: "pilot" },
+        { ok: true, stage: "public-beta" },
         { headers: { "Cache-Control": "no-store" } },
       ),
     ),
